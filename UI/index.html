@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>2048 Replay Visualizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">RL Dashboard</p>
+        <h1>2048 Replay Visualizer</h1>
+        <p class="hero-copy">Load a JSON episode, inspect each decision, and replay the game state without wiring the agent directly into the UI.</p>
+      </div>
+      <div class="hero-badge">
+        <span class="hero-badge-label">Source of truth</span>
+        <strong>Snapshot JSON</strong>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="board-panel panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-label">Board</p>
+            <h2 id="episodeTitle">No episode loaded</h2>
+          </div>
+          <div class="status-pill" id="statusPill">Idle</div>
+        </div>
+
+        <div class="score-strip">
+          <div class="metric-card">
+            <span>Score</span>
+            <strong id="scoreValue">0</strong>
+          </div>
+          <div class="metric-card">
+            <span>Max Tile</span>
+            <strong id="maxTileValue">0</strong>
+          </div>
+          <div class="metric-card">
+            <span>Step</span>
+            <strong id="stepValue">0 / 0</strong>
+          </div>
+        </div>
+
+        <div class="board-frame">
+          <div class="board-stage">
+            <div class="board-grid" id="boardGrid" aria-label="2048 board"></div>
+            <div class="animation-layer" id="animationLayer" aria-hidden="true"></div>
+          </div>
+        </div>
+
+        <div class="timeline-panel">
+          <div class="timeline-header">
+            <span>Episode Timeline</span>
+            <strong id="timelineLabel">Step 0</strong>
+          </div>
+          <input id="timelineSlider" type="range" min="0" max="0" value="0">
+        </div>
+      </section>
+
+      <aside class="inspector">
+        <section class="panel loader-panel">
+          <div class="panel-header compact">
+            <div>
+              <p class="panel-label">Input</p>
+              <h2>Episode Loader</h2>
+            </div>
+          </div>
+
+          <label class="upload-dropzone" for="fileInput">
+            <input id="fileInput" type="file" accept=".json,application/json">
+            <span class="upload-title">Choose replay JSON</span>
+            <span class="upload-copy">Open an exported episode file from your agent.</span>
+          </label>
+
+          <div class="loader-actions">
+            <button id="loadSampleButton" class="secondary-button" type="button">Load sample episode</button>
+            <button id="reloadButton" class="ghost-button" type="button">Reload current</button>
+          </div>
+
+          <div class="file-meta">
+            <div>
+              <span class="meta-label">File</span>
+              <strong id="fileName">None</strong>
+            </div>
+            <div>
+              <span class="meta-label">Agent</span>
+              <strong id="agentName">Unknown</strong>
+            </div>
+          </div>
+
+          <div class="error-box hidden" id="errorBox"></div>
+        </section>
+
+        <section class="panel controls-panel">
+          <div class="panel-header compact">
+            <div>
+              <p class="panel-label">Playback</p>
+              <h2>Controls</h2>
+            </div>
+          </div>
+
+          <div class="control-row">
+            <button id="prevButton" type="button">Prev</button>
+            <button id="playPauseButton" class="accent-button" type="button">Play</button>
+            <button id="nextButton" type="button">Next</button>
+            <button id="restartButton" type="button">Restart</button>
+          </div>
+
+          <div class="speed-control">
+            <div class="speed-header">
+              <span>Replay Speed</span>
+              <strong id="speedLabel">1.0x</strong>
+            </div>
+            <input id="speedSlider" type="range" min="0.25" max="3" step="0.25" value="1">
+          </div>
+        </section>
+
+        <section class="panel details-panel">
+          <div class="panel-header compact">
+            <div>
+              <p class="panel-label">Inspector</p>
+              <h2>Current Step</h2>
+            </div>
+          </div>
+
+          <dl class="details-grid">
+            <div>
+              <dt>Action</dt>
+              <dd id="actionValue">-</dd>
+            </div>
+            <div>
+              <dt>Reward</dt>
+              <dd id="rewardValue">0</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd id="doneValue">idle</dd>
+            </div>
+            <div>
+              <dt>Board Size</dt>
+              <dd id="boardSizeValue">4x4</dd>
+            </div>
+          </dl>
+
+          <div class="step-json">
+            <div class="step-json-header">
+              <span>Step Snapshot</span>
+            </div>
+            <pre id="stepJsonView"></pre>
+          </div>
+        </section>
+
+        <section class="panel schema-panel">
+          <div class="panel-header compact">
+            <div>
+              <p class="panel-label">Schema</p>
+              <h2>Expected JSON</h2>
+            </div>
+          </div>
+
+          <pre class="schema-preview">{
+  "meta": {
+    "game": "2048",
+    "board_size": 4,
+    "agent": "dqn_v1"
+  },
+  "steps": [
+    {
+      "step": 0,
+      "board": [[0,2,0,0],[0,0,0,0],[0,0,2,0],[0,0,0,0]],
+      "score": 0,
+      "action": null,
+      "reward": 0,
+      "done": false
+    }
+  ]
+}</pre>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
