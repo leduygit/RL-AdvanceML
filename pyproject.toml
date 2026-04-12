@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
     "matplotlib>=3.10.8",
     "numpy>=2.2.6",
+    "optuna>=4.4.0",
     "open-spiel>=1.6.11",
     "torch>=2.11.0",
     "tqdm>=4.67.3",

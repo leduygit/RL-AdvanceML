@@ -480,7 +480,7 @@ for i, step_info in enumerate(rollout[-n_show:], start=len(rollout)-n_show+1):
     print(step_info["state_text"])
     
 
-checkpoint_path = "dqn_openspiel_2048.pt"
+checkpoint_path = "double_dqn.pt"
 torch.save(
     {
         "model_state_dict": q_net.state_dict(),

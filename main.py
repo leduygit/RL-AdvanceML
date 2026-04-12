@@ -1,3 +1,19 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # DQN with OpenSpiel 2048
+# 
+# This notebook shows how to train a **Deep Q-Network (DQN)** agent on the [**2048** game](https://2048game.com/) from **OpenSpiel**.
+# 
+# What this notebook covers:
+# - install and verify dependencies on Google Colab
+# - inspect the OpenSpiel 2048 API
+# - build a thin environment wrapper around `pyspiel`
+# - train a PyTorch DQN with replay buffer and target network
+# - evaluate the learned policy
+# - visualize training curves and a greedy rollout
+
+
 import random
 import re
 from collections import deque, namedtuple
@@ -19,6 +35,14 @@ print("CUDA available:", torch.cuda.is_available())
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Device:", DEVICE)
 
+
+# ## 1. Load and inspect OpenSpiel 2048
+# 
+# OpenSpiel represents a game as a `Game` object and a playthrough position as a `State`.
+# Because **2048 includes randomness**, the tree contains **chance nodes** that we will auto-resolve inside our wrapper.
+
+
+
 game = pyspiel.load_game("2048")
 state = game.new_initial_state()
 
@@ -37,43 +61,33 @@ print("Initial state is chance node:", state.is_chance_node())
 print("Initial state string:")
 print(state)
 
-# def extract_obs(state, player_id=0):
-#     """Return log2-scaled observation vector."""
-#     for fn_name, args in [
-#         ("observation_tensor", (player_id,)),
-#         ("observation_tensor", tuple()),
-#         ("information_state_tensor", (player_id,)),
-#         ("information_state_tensor", tuple()),
-#     ]:
-#         fn = getattr(state, fn_name, None)
-#         if fn is None:
-#             continue
-#         try:
-#             obs = fn(*args)
-#             obs = np.asarray(obs, dtype=np.float32).reshape(-1)
 
-#             # 🔥 Convert to log2 scale
-#             obs = np.log2(obs + 1.0)
+# ## 2. Helper functions
+# 
+# We use a few robust helpers because OpenSpiel exposes both `observation_tensor(player)` and `observation_tensor()` variants in Python.
 
-#             return obs
-#         except TypeError:
-#             pass
-#     raise RuntimeError("Could not extract an observation tensor from state.")
 
 def extract_obs(state, player_id=0):
-    board = parse_board_numbers(state)
-    if board is None:
-        raise RuntimeError("Failed to parse board.")
+    """Return a flat float32 observation vector for the player."""
+    for fn_name, args in [
+        ("observation_tensor", (player_id,)),
+        ("observation_tensor", tuple()),
+        ("information_state_tensor", (player_id,)),
+        ("information_state_tensor", tuple()),
+    ]:
+        fn = getattr(state, fn_name, None)
+        if fn is None:
+            continue
+        try:
+            obs = fn(*args)
+            obs = np.asarray(obs, dtype=np.float32).reshape(-1)
+            return obs
+        except TypeError:
+            pass
+    raise RuntimeError("Could not extract an observation tensor from state.")
 
-    board = board.astype(np.float32)
 
-    # log2 transform (0 stays 0)
-    obs = np.log2(board + 1.0)
-
-    return obs.reshape(-1)
-
-
-def legal_actions(state, player_id=0) -> list[int]:
+def legal_actions(state, player_id=0):
     """Return legal actions for the current player state."""
     try:
         return list(state.legal_actions(player_id))
@@ -116,39 +130,6 @@ def parse_board_numbers(state):
     return None
 
 
-def empty_tile_count(board):
-    return int(np.sum(board == 0))
-
-
-def max_tile_in_target_corner(board, target_corner="top_left"):
-    n = board.shape[0]
-    corner_lookup = {
-        "top_left": (0, 0),
-        "top_right": (0, n - 1),
-        "bottom_left": (n - 1, 0),
-        "bottom_right": (n - 1, n - 1),
-    }
-    i, j = corner_lookup[target_corner]
-    return board[i, j] == np.max(board)
-
-
-def monotonicity_score_toward_corner(board, target_corner="top_left"):
-    oriented = board.astype(np.float32)
-    if target_corner == "top_right":
-        oriented = np.fliplr(oriented)
-    elif target_corner == "bottom_left":
-        oriented = np.flipud(oriented)
-    elif target_corner == "bottom_right":
-        oriented = np.flipud(np.fliplr(oriented))
-
-    # Use log2 scale so each doubling has consistent spacing.
-    log_board = np.log2(np.maximum(oriented, 1.0))
-
-    row_non_increasing = (log_board[:, :-1] >= log_board[:, 1:]).mean()
-    col_non_increasing = (log_board[:-1, :] >= log_board[1:, :]).mean()
-    return float(0.5 * (row_non_increasing + col_non_increasing))
-
-
 # Quick sanity check
 test_state = game.new_initial_state()
 auto_resolve_chance_nodes(test_state, np.random.default_rng(0))
@@ -160,30 +141,26 @@ print()
 print(test_state)
 
 
-class OpenSpiel2048Env:
-    def __init__(
-        self,
-        seed=42,
-        target_corner="top_left",
-        score_weight=1.0,
-        empty_weight=0.05,
-        monotonicity_weight=0.5,
-        corner_weight=1.0,
-    ):
-        if target_corner not in {"top_left", "top_right", "bottom_left", "bottom_right"}:
-            raise ValueError("target_corner must be one of top_left, top_right, bottom_left, bottom_right")
+# ## 3. A thin OpenSpiel 2048 wrapper
+# 
+# This wrapper:
+# - auto-resolves chance nodes,
+# - exposes `reset()` and `step(action)`,
+# - returns a **flat observation vector**,
+# - uses **delta in cumulative return** as the immediate reward.
+# 
+# For 2048, the legal action set can shrink because some moves do not change the board.
 
+
+
+class OpenSpiel2048Env:
+    def __init__(self, seed=42):
         self.game = pyspiel.load_game("2048")
         self.player_id = 0
         self.num_actions = self.game.num_distinct_actions()
         self.obs_dim = self.game.observation_tensor_size()
         self.rng = np.random.default_rng(seed)
         self.state = None
-        self.target_corner = target_corner
-        self.score_weight = float(score_weight)
-        self.empty_weight = float(empty_weight)
-        self.monotonicity_weight = float(monotonicity_weight)
-        self.corner_weight = float(corner_weight)
 
     def reset(self, seed=None):
         if seed is not None:
@@ -203,7 +180,6 @@ class OpenSpiel2048Env:
             raise ValueError(f"Illegal action {action}. Legal actions: {legal}")
 
         prev_return = state_return(self.state, self.player_id)
-        prev_board = parse_board_numbers(self.state)
 
         self.state.apply_action(int(action))
         auto_resolve_chance_nodes(self.state, self.rng)
@@ -211,44 +187,14 @@ class OpenSpiel2048Env:
         next_obs = extract_obs(self.state, self.player_id) if not self.state.is_terminal() else np.zeros(self.obs_dim, dtype=np.float32)
         new_return = state_return(self.state, self.player_id)
 
-        board = parse_board_numbers(self.state)
-        base_reward = new_return - prev_return
-
-        if board is None:
-            empty_bonus = 0.0
-            monotonicity_bonus = 0.0
-            corner_bonus = 0.0
-        else:
-            empty_bonus = self.empty_weight * empty_tile_count(board)
-            monotonicity_bonus = self.monotonicity_weight * monotonicity_score_toward_corner(
-                board, self.target_corner
-            )
-            corner_bonus = self.corner_weight if max_tile_in_target_corner(board, self.target_corner) else 0.0
-
-        reward = (
-            self.score_weight * base_reward
-            + empty_bonus
-            + monotonicity_bonus
-            + corner_bonus
-        )
-
-        prev_empty = empty_tile_count(prev_board) if prev_board is not None else 0
-        next_empty = empty_tile_count(board) if board is not None else 0
+        reward = new_return - prev_return
         done = self.state.is_terminal()
         info = {
             "legal_actions": legal_actions(self.state, self.player_id) if not done else [],
             "state_return": new_return,
             "state_reward_raw": state_reward(self.state, self.player_id),
-            "board": board,
+            "board": parse_board_numbers(self.state),
             "state_text": str(self.state),
-            "reward_components": {
-                "base_score_delta": float(base_reward),
-                "empty_bonus": float(empty_bonus),
-                "monotonicity_bonus": float(monotonicity_bonus),
-                "corner_bonus": float(corner_bonus),
-            },
-            "empty_tiles_before": int(prev_empty),
-            "empty_tiles_after": int(next_empty),
         }
         return next_obs, float(reward), done, info
 
@@ -262,7 +208,7 @@ class OpenSpiel2048Env:
             print("<env not reset>")
         else:
             print(self.state)
-            
+
 
 # Demo: random rollout
 env = OpenSpiel2048Env(seed=123)
@@ -338,6 +284,18 @@ def masked_greedy_action(q_net, obs, legal_actions_list, num_actions, epsilon=0.
     return action
 
 
+# ## 5. Training loop
+# 
+# This is a straightforward DQN:
+# - replay buffer
+# - target network
+# - epsilon-greedy exploration
+# - legal-action masking
+# - MSE loss on the Bellman target
+# 
+# Because 2048 is stochastic and can run for many steps, the default training budget below is intentionally moderate for Colab.
+
+
 # Hyperparameters
 SEED = 7
 random.seed(SEED)
@@ -348,8 +306,7 @@ NUM_EPISODES = 5000          # increase to 800+ for stronger results
 BUFFER_SIZE = 50_000
 BATCH_SIZE = 128
 GAMMA = 0.99
-# LR = 1e-3
-LR = 5e-4
+LR = 1e-3
 TARGET_SYNC_EVERY = 250
 LEARN_START = 1_000
 LEARN_EVERY = 4
@@ -359,15 +316,7 @@ EPS_DECAY_STEPS = 20_000
 MAX_STEPS_PER_EPISODE = 5_000
 GRAD_CLIP = 10.0
 
-REWARD_SHAPING_CONFIG = {
-    "target_corner": "top_left",
-    "score_weight": 1.0,
-    "empty_weight": 0.05,
-    "monotonicity_weight": 0.5,
-    "corner_weight": 1.0,
-}
-
-train_env = OpenSpiel2048Env(seed=SEED, **REWARD_SHAPING_CONFIG)
+train_env = OpenSpiel2048Env(seed=SEED)
 
 obs_dim = train_env.obs_dim
 num_actions = train_env.num_actions
@@ -382,7 +331,8 @@ replay = ReplayBuffer(BUFFER_SIZE)
 
 print("obs_dim =", obs_dim)
 print("num_actions =", num_actions)
-print("reward_shaping =", REWARD_SHAPING_CONFIG)
+
+
 
 
 def epsilon_by_step(step):
@@ -403,19 +353,13 @@ def dqn_update(batch):
     q_sa = q_values.gather(1, actions).squeeze(1)
 
     with torch.no_grad():
-        # 🔥 Step 1: select best action using ONLINE network
-        next_q_online = q_net(next_obs)
-        next_q_online = next_q_online.masked_fill(~next_legal_mask, -1e9)
-        next_actions = torch.argmax(next_q_online, dim=1, keepdim=True)
+        next_q = target_net(next_obs)
+        next_q = next_q.masked_fill(~next_legal_mask, -1e9)
 
-        # 🔥 Step 2: evaluate using TARGET network
-        next_q_target = target_net(next_obs)
-        next_q_target = next_q_target.gather(1, next_actions).squeeze(1)
+        next_max_q = torch.max(next_q, dim=1).values
+        next_max_q = torch.where(dones > 0.5, torch.zeros_like(next_max_q), next_max_q)
 
-        # zero for terminal states
-        next_q_target = torch.where(dones > 0.5, torch.zeros_like(next_q_target), next_q_target)
-
-        target = rewards + GAMMA * next_q_target
+        target = rewards + GAMMA * next_max_q
 
     loss = F.mse_loss(q_sa, target)
 
@@ -434,7 +378,7 @@ eval_returns = []
 
 global_step = 0
 
-for episode in tqdm(range(1, NUM_EPISODES + 1), desc="Training (shaped reward)"):
+for episode in tqdm(range(1, NUM_EPISODES + 1), desc="Training"):
     obs = train_env.reset(seed=SEED + episode)
     done = False
     ep_return = 0.0
@@ -477,7 +421,7 @@ for episode in tqdm(range(1, NUM_EPISODES + 1), desc="Training (shaped reward)")
     episode_lengths.append(ep_len)
 
     if episode % 20 == 0:
-        eval_env = OpenSpiel2048Env(seed=1000 + episode, **REWARD_SHAPING_CONFIG)
+        eval_env = OpenSpiel2048Env(seed=1000 + episode)
         obs_eval = eval_env.reset(seed=2000 + episode)
         done_eval = False
         ret_eval = 0.0
@@ -491,6 +435,9 @@ for episode in tqdm(range(1, NUM_EPISODES + 1), desc="Training (shaped reward)")
         eval_returns.append((episode, ret_eval))
 
 print("Training complete.")
+
+
+# ## 6. Plot learning curves
 
 
 def moving_average(x, w=20):
@@ -531,9 +478,12 @@ if eval_returns:
     plt.xlabel("Episode")
     plt.ylabel("Return")
     plt.show()
-    
 
-eval_env = OpenSpiel2048Env(seed=999, **REWARD_SHAPING_CONFIG)
+
+# ## 7. Evaluate a greedy policy and inspect the final board
+
+
+eval_env = OpenSpiel2048Env(seed=999)
 obs = eval_env.reset(seed=999)
 done = False
 greedy_return = 0.0
@@ -567,9 +517,15 @@ for i, step_info in enumerate(rollout[-n_show:], start=len(rollout)-n_show+1):
     if step_info["board"] is not None:
         print(step_info["board"])
     print(step_info["state_text"])
-    
 
-checkpoint_path = "double_dqn_reward_shaped.pt"
+
+# ## 8. Save the model
+# 
+# You can download this checkpoint from Colab or store it to Google Drive.
+
+
+
+checkpoint_path = "baseline.pt"
 torch.save(
     {
         "model_state_dict": q_net.state_dict(),
@@ -583,3 +539,15 @@ torch.save(
     checkpoint_path,
 )
 print("Saved checkpoint to:", checkpoint_path)
+
+
+# ## 9. Suggested extensions for students
+# 
+# 1. Replace vanilla DQN with **Double DQN**.
+# 2. Add **dueling heads**.
+# 3. Compare **delta-return reward** versus raw `state.rewards()`.
+# 4. Try a different state encoding if you decode the board more explicitly.
+# 5. Track additional metrics such as:
+#    - maximum tile reached,
+#    - fraction of illegal actions avoided,
+#    - average greedy return over multiple seeds.
