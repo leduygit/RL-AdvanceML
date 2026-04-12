@@ -3,4 +3,4 @@ logs/
 *.json
 .venv/
 __pycache__/
-docs/
+docs/*
