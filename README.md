@@ -34,7 +34,7 @@ The UI is plain HTML/CSS/JS and does not require npm.
 Train the Double DQN version:
 
 ```powershell
-python HW_DoubleDQN.py
+uv run HW_DoubleDQN.py
 ```
 
 The script save a checkpoint named:
@@ -48,7 +48,7 @@ dqn_openspiel_2048.pt
 Generate a rollout from a trained checkpoint:
 
 ```powershell
-python export_2048_replay.py --checkpoint dqn_openspiel_2048.pt --output "UI/model-rollout.json"
+uv run export_2048_replay.py --checkpoint dqn_openspiel_2048.pt --output "UI/model-rollout.json"
 ```
 
 Useful options:
@@ -60,7 +60,21 @@ Useful options:
 Example:
 
 ```powershell
-python export_2048_replay.py --checkpoint dqn_openspiel_2048.pt --output "UI/model-rollout.json" --seed 123 --max-steps 1000
+uv run export_2048_replay.py --checkpoint dqn_openspiel_2048.pt --output "UI/model-rollout.json" --seed 123 --max-steps 1000
+```
+
+## Find The Best Seed By Steps
+
+If different seeds produce different rollout lengths, run a seed sweep and pick the seed with the maximum steps:
+
+```powershell
+uv run find_best_seed.py --checkpoint dqn_openspiel_2048.pt --seed-start 0 --seed-end 2000 --max-steps 5000
+```
+
+Optional: save the best-seed replay JSON directly for the UI:
+
+```powershell
+uv run find_best_seed.py --checkpoint dqn_openspiel_2048.pt --seed-start 0 --seed-end 2000 --max-steps 5000 --output-best-json "UI/model-rollout-best-seed.json"
 ```
 
 Important on Windows:
