@@ -351,30 +351,35 @@ def flush_n_step_queue_to_replay(n_step_queue, replay, gamma):
         n_step_queue.popleft()
 
 
-class QNetwork(nn.Module):
-    def __init__(self, in_channels, num_actions, hidden_dim=256):
+class DuelingQNetwork(nn.Module):
+    def __init__(self, in_channels, num_actions, hidden_dim=512):
         super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+
+        flat_dim = in_channels * BOARD_SIZE * BOARD_SIZE
+
+        self.feature_layer = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(flat_dim, hidden_dim),
             nn.ReLU(),
         )
 
-        with torch.no_grad():
-            dummy = torch.zeros(1, in_channels, BOARD_SIZE, BOARD_SIZE)
-            flat_dim = self.features(dummy).reshape(1, -1).shape[1]
-
-        self.head = nn.Sequential(
-            nn.Linear(flat_dim, hidden_dim),
+        self.value_stream = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim, num_actions),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, num_actions),
         )
 
     def forward(self, x):
-        z = self.features(x)
-        z = z.reshape(z.size(0), -1)
-        return self.head(z)
+        features = self.feature_layer(x)
+        values = self.value_stream(features)
+        advantages = self.advantage_stream(features)
+        return values + (advantages - advantages.mean(dim=1, keepdim=True))
 
 
 @torch.no_grad()
@@ -399,17 +404,17 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-NUM_EPISODES = 25_000        
-BUFFER_SIZE = 100_000      
+NUM_EPISODES = 5000
+BUFFER_SIZE = 100_000
 BATCH_SIZE = 256
 GAMMA = 0.99
-LR = 1e-4
-TARGET_SYNC_EVERY = 5_000  
+LR = 2e-4
+TARGET_SYNC_EVERY = 2_500
 LEARN_START = 5_000
 LEARN_EVERY = 4
 EPS_START = 1.0
-EPS_END = 0.05
-EPS_DECAY_STEPS = 500_000
+EPS_END = 0.01
+EPS_DECAY_STEPS = 250_000
 MAX_STEPS_PER_EPISODE = 5_000
 GRAD_CLIP = 10.0
 N_STEP = 3
@@ -429,8 +434,8 @@ obs_shape = train_env.obs_shape
 obs_dim = train_env.obs_dim
 num_actions = train_env.num_actions
 
-q_net = QNetwork(obs_shape[0], num_actions).to(DEVICE)
-target_net = QNetwork(obs_shape[0], num_actions).to(DEVICE)
+q_net = DuelingQNetwork(obs_shape[0], num_actions).to(DEVICE)
+target_net = DuelingQNetwork(obs_shape[0], num_actions).to(DEVICE)
 target_net.load_state_dict(q_net.state_dict())
 target_net.eval()
 
@@ -639,7 +644,7 @@ for i, step_info in enumerate(rollout[-n_show:], start=len(rollout)-n_show+1):
     print(step_info["state_text"])
     
 
-checkpoint_path = "dqn_openspiel_2048_nstep_onehot_cnn.pt"
+checkpoint_path = "dqn_openspiel_2048_nstep_onehot_dueling.pt"
 torch.save(
     {
         "model_state_dict": q_net.state_dict(),

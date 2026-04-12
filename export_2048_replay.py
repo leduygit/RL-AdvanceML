@@ -185,13 +185,67 @@ class QNetwork(nn.Module):
         return self.net(x)
 
 
+class DuelingQNetwork(nn.Module):
+    def __init__(self, in_channels, num_actions, hidden_dim=512):
+        super().__init__()
+
+        flat_dim = in_channels * BOARD_SIZE * BOARD_SIZE
+
+        self.feature_layer = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(flat_dim, hidden_dim),
+            nn.ReLU(),
+        )
+
+        self.value_stream = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, num_actions),
+        )
+
+    def forward(self, x):
+        features = self.feature_layer(x)
+        values = self.value_stream(features)
+        advantages = self.advantage_stream(features)
+        return values + (advantages - advantages.mean(dim=1, keepdim=True))
+
+
 class QNetworkCNN(nn.Module):
-    def __init__(self, in_channels, num_actions, hidden_dim=256):
+    def __init__(
+        self,
+        in_channels,
+        num_actions,
+        hidden_dim=256,
+        conv1_out=64,
+        conv2_out=128,
+        conv1_kernel_size=2,
+        conv2_kernel_size=2,
+        conv1_padding=0,
+        conv2_padding=0,
+    ):
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(in_channels, 64, kernel_size=2, stride=1, padding=0),
+            nn.Conv2d(
+                in_channels,
+                conv1_out,
+                kernel_size=conv1_kernel_size,
+                stride=1,
+                padding=conv1_padding,
+            ),
             nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=2, stride=1, padding=0),
+            nn.Conv2d(
+                conv1_out,
+                conv2_out,
+                kernel_size=conv2_kernel_size,
+                stride=1,
+                padding=conv2_padding,
+            ),
             nn.ReLU(),
         )
 
@@ -240,6 +294,52 @@ def action_to_label(state, action):
     return fallback.get(int(action), f"action_{action}")
 
 
+def infer_cnn_arch_from_state_dict(state_dict):
+    conv1_w = state_dict.get("features.0.weight")
+    conv2_w = state_dict.get("features.2.weight")
+    head0_w = state_dict.get("head.0.weight")
+
+    if conv1_w is None or conv2_w is None or head0_w is None:
+        raise KeyError("CNN checkpoint is missing expected keys under features/head blocks.")
+
+    conv1_out, in_channels, k1_h, k1_w = conv1_w.shape
+    conv2_out, conv2_in, k2_h, k2_w = conv2_w.shape
+    if conv2_in != conv1_out:
+        raise ValueError("Incompatible CNN checkpoint: features.0 and features.2 channel sizes do not align.")
+
+    hidden_dim = int(head0_w.shape[0])
+    expected_flat_dim = int(head0_w.shape[1])
+
+    # Try small paddings and pick one that reproduces the saved head input size.
+    for p1 in range(0, 4):
+        out1_h = BOARD_SIZE + 2 * p1 - int(k1_h) + 1
+        out1_w = BOARD_SIZE + 2 * p1 - int(k1_w) + 1
+        if out1_h <= 0 or out1_w <= 0:
+            continue
+        for p2 in range(0, 4):
+            out2_h = out1_h + 2 * p2 - int(k2_h) + 1
+            out2_w = out1_w + 2 * p2 - int(k2_w) + 1
+            if out2_h <= 0 or out2_w <= 0:
+                continue
+            flat_dim = int(conv2_out) * out2_h * out2_w
+            if flat_dim == expected_flat_dim:
+                return {
+                    "in_channels": int(in_channels),
+                    "conv1_out": int(conv1_out),
+                    "conv2_out": int(conv2_out),
+                    "conv1_kernel_size": (int(k1_h), int(k1_w)),
+                    "conv2_kernel_size": (int(k2_h), int(k2_w)),
+                    "conv1_padding": p1,
+                    "conv2_padding": p2,
+                    "hidden_dim": hidden_dim,
+                }
+
+    raise ValueError(
+        "Could not infer CNN paddings from checkpoint shapes. "
+        "Please ensure the checkpoint matches the expected two-conv architecture."
+    )
+
+
 def load_checkpoint(path):
     checkpoint = torch.load(path, map_location=DEVICE)
     obs_dim = int(checkpoint["obs_dim"])
@@ -247,14 +347,37 @@ def load_checkpoint(path):
 
     state_dict = checkpoint["model_state_dict"]
     uses_cnn = any(k.startswith("features.") or k.startswith("head.") for k in state_dict.keys())
+    uses_dueling = any(k.startswith("feature_layer.") or k.startswith("value_stream.") or k.startswith("advantage_stream.") for k in state_dict.keys())
 
     if uses_cnn:
+        arch = infer_cnn_arch_from_state_dict(state_dict)
+        model = QNetworkCNN(
+            in_channels=arch["in_channels"],
+            num_actions=num_actions,
+            hidden_dim=arch["hidden_dim"],
+            conv1_out=arch["conv1_out"],
+            conv2_out=arch["conv2_out"],
+            conv1_kernel_size=arch["conv1_kernel_size"],
+            conv2_kernel_size=arch["conv2_kernel_size"],
+            conv1_padding=arch["conv1_padding"],
+            conv2_padding=arch["conv2_padding"],
+        ).to(DEVICE)
+    elif uses_dueling:
         obs_shape = checkpoint.get("obs_shape")
         if obs_shape is not None and len(obs_shape) == 3:
             in_channels = int(obs_shape[0])
         else:
-            in_channels = obs_dim // (BOARD_SIZE * BOARD_SIZE)
-        model = QNetworkCNN(in_channels, num_actions).to(DEVICE)
+            in_channels = max(1, obs_dim // (BOARD_SIZE * BOARD_SIZE))
+
+        hidden_dim = 512
+        if "feature_layer.1.weight" in state_dict:
+            hidden_dim = int(state_dict["feature_layer.1.weight"].shape[0])
+
+        model = DuelingQNetwork(
+            in_channels=in_channels,
+            num_actions=num_actions,
+            hidden_dim=hidden_dim,
+        ).to(DEVICE)
     else:
         model = QNetwork(obs_dim, num_actions).to(DEVICE)
 
