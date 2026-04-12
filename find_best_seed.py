@@ -25,7 +25,7 @@ def main():
     parser.add_argument("--max-steps", type=int, default=5000, help="Maximum number of steps per rollout.")
     parser.add_argument(
         "--obs-mode",
-        choices=["auto", "tensor", "log2_board"],
+        choices=["auto", "tensor", "log2_board", "onehot_board"],
         default="auto",
         help="Observation preprocessing mode. Use auto to infer from checkpoint obs_dim.",
     )

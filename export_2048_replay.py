@@ -13,6 +13,9 @@ import pyspiel
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+BOARD_SIZE = 4
+DEFAULT_MAX_ONEHOT_EXPONENT = 15
+
 
 def parse_board_numbers(state):
     txt = str(state)
@@ -48,6 +51,22 @@ def extract_log2_board_obs(state):
     return np.log2(board.astype(np.float32) + 1.0).reshape(-1)
 
 
+def extract_onehot_board_obs(state, max_onehot_exponent=DEFAULT_MAX_ONEHOT_EXPONENT):
+    board = parse_board_numbers(state)
+    if board is None:
+        raise RuntimeError("Failed to parse 4x4 board from state.")
+
+    obs_channels = int(max_onehot_exponent) + 1
+    board = board.astype(np.int64)
+    exponents = np.zeros_like(board, dtype=np.int64)
+    non_zero = board > 0
+    exponents[non_zero] = np.log2(board[non_zero]).astype(np.int64)
+    exponents = np.clip(exponents, 0, int(max_onehot_exponent))
+
+    one_hot = np.eye(obs_channels, dtype=np.float32)[exponents]
+    return np.moveaxis(one_hot, -1, 0)
+
+
 def legal_actions(state, player_id=0):
     try:
         return list(state.legal_actions(player_id))
@@ -74,25 +93,40 @@ def state_return(state, player_id=0):
 
 
 class OpenSpiel2048Env:
-    def __init__(self, seed=42, obs_mode="auto", expected_obs_dim=None):
+    def __init__(self, seed=42, obs_mode="auto", expected_obs_dim=None, max_onehot_exponent=DEFAULT_MAX_ONEHOT_EXPONENT):
         self.game = pyspiel.load_game("2048")
         self.player_id = 0
         self.num_actions = self.game.num_distinct_actions()
         self.rng = np.random.default_rng(seed)
         self.state = None
+        self.max_onehot_exponent = int(max_onehot_exponent)
         self.obs_mode = self._resolve_obs_mode(obs_mode, expected_obs_dim)
-        self.obs_dim = 16 if self.obs_mode == "log2_board" else self.game.observation_tensor_size()
+
+        if self.obs_mode == "log2_board":
+            self.obs_shape = (16,)
+        elif self.obs_mode == "onehot_board":
+            self.obs_shape = (self.max_onehot_exponent + 1, BOARD_SIZE, BOARD_SIZE)
+        else:
+            self.obs_shape = (self.game.observation_tensor_size(),)
+
+        self.obs_dim = int(np.prod(self.obs_shape))
 
     def _resolve_obs_mode(self, obs_mode, expected_obs_dim):
-        if obs_mode in {"tensor", "log2_board"}:
+        if obs_mode in {"tensor", "log2_board", "onehot_board"}:
             return obs_mode
         if expected_obs_dim == 16:
             return "log2_board"
+        if expected_obs_dim and expected_obs_dim % (BOARD_SIZE * BOARD_SIZE) == 0:
+            channels = expected_obs_dim // (BOARD_SIZE * BOARD_SIZE)
+            if channels >= 2:
+                return "onehot_board"
         return "tensor"
 
     def extract_obs(self):
         if self.obs_mode == "log2_board":
             return extract_log2_board_obs(self.state)
+        if self.obs_mode == "onehot_board":
+            return extract_onehot_board_obs(self.state, self.max_onehot_exponent)
         return extract_tensor_obs(self.state, self.player_id)
 
     def reset(self, seed=None):
@@ -117,7 +151,7 @@ class OpenSpiel2048Env:
         auto_resolve_chance_nodes(self.state, self.rng)
 
         done = self.state.is_terminal()
-        next_obs = self.extract_obs() if not done else np.zeros(self.obs_dim, dtype=np.float32)
+        next_obs = self.extract_obs() if not done else np.zeros(self.obs_shape, dtype=np.float32)
         new_return = state_return(self.state, self.player_id)
         reward = new_return - prev_return
 
@@ -149,6 +183,32 @@ class QNetwork(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+class QNetworkCNN(nn.Module):
+    def __init__(self, in_channels, num_actions, hidden_dim=256):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=2, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=2, stride=1, padding=0),
+            nn.ReLU(),
+        )
+
+        with torch.no_grad():
+            dummy = torch.zeros(1, in_channels, BOARD_SIZE, BOARD_SIZE)
+            flat_dim = self.features(dummy).reshape(1, -1).shape[1]
+
+        self.head = nn.Sequential(
+            nn.Linear(flat_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_actions),
+        )
+
+    def forward(self, x):
+        z = self.features(x)
+        z = z.reshape(z.size(0), -1)
+        return self.head(z)
 
 
 @torch.no_grad()
@@ -184,14 +244,32 @@ def load_checkpoint(path):
     checkpoint = torch.load(path, map_location=DEVICE)
     obs_dim = int(checkpoint["obs_dim"])
     num_actions = int(checkpoint["num_actions"])
-    model = QNetwork(obs_dim, num_actions).to(DEVICE)
+
+    state_dict = checkpoint["model_state_dict"]
+    uses_cnn = any(k.startswith("features.") or k.startswith("head.") for k in state_dict.keys())
+
+    if uses_cnn:
+        obs_shape = checkpoint.get("obs_shape")
+        if obs_shape is not None and len(obs_shape) == 3:
+            in_channels = int(obs_shape[0])
+        else:
+            in_channels = obs_dim // (BOARD_SIZE * BOARD_SIZE)
+        model = QNetworkCNN(in_channels, num_actions).to(DEVICE)
+    else:
+        model = QNetwork(obs_dim, num_actions).to(DEVICE)
+
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return checkpoint, model
 
 
 def rollout_episode(model, checkpoint, seed, max_steps, obs_mode):
-    env = OpenSpiel2048Env(seed=seed, obs_mode=obs_mode, expected_obs_dim=int(checkpoint["obs_dim"]))
+    env = OpenSpiel2048Env(
+        seed=seed,
+        obs_mode=obs_mode,
+        expected_obs_dim=int(checkpoint["obs_dim"]),
+        max_onehot_exponent=int(checkpoint.get("max_onehot_exponent", DEFAULT_MAX_ONEHOT_EXPONENT)),
+    )
     obs = env.reset(seed=seed)
     board = env.current_board()
     initial_legal = legal_actions(env.state, env.player_id)
@@ -271,7 +349,7 @@ def main():
     parser.add_argument("--max-steps", type=int, default=5000, help="Maximum number of agent decisions to export.")
     parser.add_argument(
         "--obs-mode",
-        choices=["auto", "tensor", "log2_board"],
+        choices=["auto", "tensor", "log2_board", "onehot_board"],
         default="auto",
         help="Observation preprocessing mode. Use auto to infer from checkpoint obs_dim.",
     )
