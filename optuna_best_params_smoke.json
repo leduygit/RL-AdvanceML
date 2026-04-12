@@ -1,0 +1,22 @@
+{
+  "study_name": "dqn_2048_tpe",
+  "n_trials_total": 1,
+  "best_trial_number": 0,
+  "best_value": 896.0,
+  "best_params": {
+    "hidden_dim": 256,
+    "gamma": 0.9909804901570973,
+    "lr": 0.0043607818097022005,
+    "batch_size": 64,
+    "buffer_size": 100000,
+    "target_sync_every": 100,
+    "learn_every": 2,
+    "eps_end": 0.07329735465447564,
+    "eps_decay_steps": 60000,
+    "grad_clip": 1.4730853234566124
+  },
+  "best_user_attrs": {
+    "last_eval_len": 116.0,
+    "final_eval_length": 116.0
+  }
+}

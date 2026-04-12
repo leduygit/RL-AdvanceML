@@ -1,6 +1,6 @@
 *.pt
 logs/
-*.json
+
 .venv/
 __pycache__/
 docs/*
