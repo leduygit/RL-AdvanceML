@@ -1,0 +1,2 @@
+checkpoint,seed_start,seed_end,max_steps,top_k,best_seed,best_steps,best_score,best_max_tile,avg_steps_all,avg_score_all,avg_max_tile_all,avg_steps_topk,avg_score_topk,avg_max_tile_topk
+double_dqn.pt,0,5000,5000,10,1598,783,12940.0000,1024,232.3653,2859.7656,251.2202,717.5000,11774.0000,921.6000

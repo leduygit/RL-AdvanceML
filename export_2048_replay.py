@@ -151,6 +151,31 @@ class QNetwork(nn.Module):
         return self.net(x)
 
 
+class QNetworkCNN(nn.Module):
+    def __init__(self, obs_dim, num_actions, hidden_dim=256):
+        super().__init__()
+        import math
+        self.board_size = int(math.sqrt(obs_dim))
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+        self.head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * self.board_size * self.board_size, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_actions),
+        )
+
+    def forward(self, x):
+        if x.dim() == 2:
+            x = x.view(x.size(0), 1, self.board_size, self.board_size)
+        x = self.conv(x)
+        return self.head(x)
+
+
 @torch.no_grad()
 def greedy_policy_step(q_net, obs, legal_actions_list, num_actions, device=DEVICE):
     obs_t = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
@@ -182,10 +207,40 @@ def action_to_label(state, action):
 
 def load_checkpoint(path):
     checkpoint = torch.load(path, map_location=DEVICE)
-    obs_dim = int(checkpoint["obs_dim"])
-    num_actions = int(checkpoint["num_actions"])
-    model = QNetwork(obs_dim, num_actions).to(DEVICE)
+    state_dict = checkpoint["model_state_dict"]
+
+    is_cnn = "conv.0.weight" in state_dict
+
+    if is_cnn:
+        # CNN architecture: infer dims from conv/head weights
+        head_first_w = state_dict.get("head.1.weight")
+        head_last_w = state_dict.get("head.3.weight")
+        inferred_hidden_dim = int(head_first_w.shape[0]) if head_first_w is not None else None
+        inferred_num_actions = int(head_last_w.shape[0]) if head_last_w is not None else None
+        inferred_obs_dim = None  # rely on checkpoint metadata for CNN
+    else:
+        # MLP architecture: infer dims from net weights
+        first_w = state_dict.get("net.0.weight")
+        last_w = state_dict.get("net.4.weight")
+        inferred_obs_dim = int(first_w.shape[1]) if first_w is not None else None
+        inferred_hidden_dim = int(first_w.shape[0]) if first_w is not None else None
+        inferred_num_actions = int(last_w.shape[0]) if last_w is not None else None
+
+    obs_dim = int(checkpoint.get("obs_dim", inferred_obs_dim))
+    num_actions = int(checkpoint.get("num_actions", inferred_num_actions))
+    hidden_dim = int(checkpoint.get("hidden_dim", inferred_hidden_dim or 256))
+
+    if obs_dim is None or num_actions is None:
+        raise KeyError(
+            "Checkpoint is missing obs_dim/num_actions and could not infer them from model_state_dict."
+        )
+
+    if is_cnn:
+        model = QNetworkCNN(obs_dim, num_actions, hidden_dim=hidden_dim).to(DEVICE)
+    else:
+        model = QNetwork(obs_dim, num_actions, hidden_dim=hidden_dim).to(DEVICE)
     model.load_state_dict(checkpoint["model_state_dict"])
+    checkpoint.setdefault("hidden_dim", hidden_dim)
     model.eval()
     return checkpoint, model
 

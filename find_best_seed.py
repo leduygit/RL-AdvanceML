@@ -21,7 +21,7 @@ def main():
         help="Path to a saved .pt checkpoint. If omitted, sweep all .pt files in the current directory.",
     )
     parser.add_argument("--seed-start", type=int, default=0, help="Start seed (inclusive).")
-    parser.add_argument("--seed-end", type=int, default=999, help="End seed (inclusive).")
+    parser.add_argument("--seed-end", type=int, default=5000, help="End seed (inclusive).")
     parser.add_argument("--max-steps", type=int, default=5000, help="Maximum number of steps per rollout.")
     parser.add_argument(
         "--obs-mode",
