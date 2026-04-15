@@ -21,7 +21,7 @@ def main():
         help="Path to a saved .pt checkpoint. If omitted, sweep all .pt files in the current directory.",
     )
     parser.add_argument("--seed-start", type=int, default=0, help="Start seed (inclusive).")
-    parser.add_argument("--seed-end", type=int, default=999, help="End seed (inclusive).")
+    parser.add_argument("--seed-end", type=int, default=5000, help="End seed (inclusive).")
     parser.add_argument("--max-steps", type=int, default=5000, help="Maximum number of steps per rollout.")
     parser.add_argument(
         "--obs-mode",
@@ -197,7 +197,7 @@ def main():
         "avg_max_tile_topk",
     ]
 
-    with output_csv.open("w", newline="", encoding="utf-8") as f:
+    with output_csv.open("a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(summary_rows)

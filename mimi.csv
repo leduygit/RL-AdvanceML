@@ -1,0 +1,2 @@
+checkpoint,seed_start,seed_end,max_steps,top_k,best_seed,best_steps,best_score,best_max_tile,avg_steps_all,avg_score_all,avg_max_tile_all,avg_steps_topk,avg_score_topk,avg_max_tile_topk
+dqn_openspiel_2048_nstep_reward.pt,0,5000,5000,10,3312,1040,17560.0000,1024,311.2885,4045.5517,319.4881,933.2000,15806.8000,1024.0000
